@@ -1,0 +1,201 @@
+Option Explicit
+Sub UpdateRetentionValuesInSubfolders()
+    Dim mainInputFolderPath As String
+    Dim newValue As Double
+    Dim fso As Object
+    Dim mainInputFolder As Object
+    Dim subFolder As Object
+    Dim file As Object
+    Dim wb As Workbook
+    Dim ws As Worksheet
+    Dim foundCell As Range
+    Dim targetCell As Range
+    Dim changes As Long
+    Dim totalChanges As Long
+    Dim skippedCells As Long
+    Dim originalCalculation As XlCalculation
+    Dim offsetColumns As Long
+    Dim fileExtension As String
+    Dim processedFiles As Long
+    Dim skippedFiles As Long
+    
+    ' Set main input folder path and offset (modify as needed)
+    mainInputFolderPath = "C:\Users\Angeline\Desktop\Absa Files\2021\4million\"
+    offsetColumns = 1 ' Number of columns to the right of "Retention" (to column D)
+    
+    ' Prompt for new Retention value once
+    Dim inputValue As String
+    inputValue = InputBox("Enter the new Retention value to apply to all instances (e.g., 6000000):", "Update Retention")
+    If inputValue = "" Then
+        MsgBox "Operation cancelled.", vbInformation
+        Exit Sub
+    End If
+    If Not IsNumeric(inputValue) Then
+        MsgBox "Invalid input. Please enter a numeric value.", vbCritical
+        Exit Sub
+    End If
+    newValue = CDbl(inputValue)
+    
+    ' Confirmation prompt since we're modifying originals
+    If MsgBox("WARNING: This will modify the ORIGINAL files in place." & vbNewLine & _
+              "No backup copies will be created." & vbNewLine & vbNewLine & _
+              "Do you want to continue?", vbYesNo + vbExclamation, "Confirm Modification") = vbNo Then
+        MsgBox "Operation cancelled.", vbInformation
+        Exit Sub
+    End If
+    
+    ' Ensure main input folder path ends with backslash
+    If Right(mainInputFolderPath, 1) <> "\" Then mainInputFolderPath = mainInputFolderPath & "\"
+    
+    ' Check if main input folder exists
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(mainInputFolderPath) Then
+        MsgBox "Main input folder path does not exist: " & mainInputFolderPath, vbCritical
+        Exit Sub
+    End If
+    
+    ' Disable screen updating and automatic calculation for performance
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    originalCalculation = Application.Calculation
+    Application.Calculation = xlCalculationManual
+    
+    Set mainInputFolder = fso.GetFolder(mainInputFolderPath)
+    totalChanges = 0
+    skippedCells = 0
+    processedFiles = 0
+    skippedFiles = 0
+    
+    ' Loop through each subfolder (quarter) in the main input folder
+    For Each subFolder In mainInputFolder.SubFolders
+        Debug.Print "Processing subfolder: " & subFolder.Name
+        
+        ' Loop through each file in the subfolder
+        For Each file In subFolder.Files
+            fileExtension = LCase(Right(file.Name, Len(file.Name) - InStrRev(file.Name, ".")))
+            If fileExtension = "xlsx" Or fileExtension = "xlsm" Or fileExtension = "xls" Then
+                Debug.Print "Processing file: " & file.Name & " (Type: " & fileExtension & ")"
+                processedFiles = processedFiles + 1
+                Application.StatusBar = "Files processed: " & processedFiles
+                
+                On Error Resume Next
+                Set wb = Nothing
+                Set wb = Workbooks.Open(file.Path, ReadOnly:=False) ' Open with write access
+                
+                If Err.Number = 0 And Not wb Is Nothing Then
+                    On Error GoTo 0
+                    changes = 0
+                    
+                    ' Loop through each worksheet
+                    For Each ws In wb.Worksheets
+                        Debug.Print "Checking worksheet: " & ws.Name & " in " & file.Name
+                        ' Search for "Retention" in column C only
+                        Set foundCell = ws.Range("C:C").Find(What:="Retention", _
+                                                                LookIn:=xlValues, _
+                                                                LookAt:=xlPart, _
+                                                                MatchCase:=False)
+                        
+                        If Not foundCell Is Nothing Then
+                            Dim firstAddress As String
+                            firstAddress = foundCell.Address
+                            
+                            Do
+                                Debug.Print "Found 'Retention' at " & ws.Name & "!" & foundCell.Address
+                                
+                                ' Get the top-left cell of merged range (if any) for label
+                                If foundCell.MergeCells Then
+                                    Set foundCell = foundCell.MergeArea.Cells(1, 1)
+                                End If
+                                
+                                ' Calculate target cell column (D)
+                                Dim targetColumn As Long
+                                targetColumn = foundCell.Column + offsetColumns
+                                If targetColumn > ws.Columns.Count Then
+                                    Debug.Print "Target cell out of bounds for " & ws.Name & "!" & foundCell.Address
+                                    skippedCells = skippedCells + 1
+                                    GoTo NextOccurrence
+                                End If
+                                
+                                ' Get the target cell (D column, merged with E and F)
+                                Set targetCell = ws.Cells(foundCell.Row, targetColumn)
+                                
+                                ' If target cell is merged (e.g., D:E:F), take its top-left
+                                If targetCell.MergeCells Then
+                                    Set targetCell = targetCell.MergeArea.Cells(1, 1)
+                                End If
+                                
+                                ' Update if valid (optional: overwrite non-numeric values)
+                                If Not IsEmpty(targetCell.Value) Then
+                                    If IsNumeric(targetCell.Value) Then
+                                        Debug.Print "Updating " & ws.Name & "!" & targetCell.Address & _
+                                                    " from " & targetCell.Value & " to " & newValue
+                                        targetCell.Value = newValue
+                                        changes = changes + 1
+                                    Else
+                                        Debug.Print "Non-numeric value at " & ws.Name & "!" & targetCell.Address & ": " & targetCell.Value
+                                        skippedCells = skippedCells + 1
+                                        ' Optional: Uncomment to overwrite non-numeric values
+                                        ' targetCell.Value = newValue
+                                        ' changes = changes + 1
+                                    End If
+                                Else
+                                    Debug.Print "Empty cell at " & ws.Name & "!" & targetCell.Address
+                                    skippedCells = skippedCells + 1
+                                End If
+                                
+NextOccurrence:
+                                ' Find next occurrence
+                                Set foundCell = ws.Range("C:C").FindNext(foundCell)
+                            Loop While Not foundCell Is Nothing And foundCell.Address <> firstAddress
+                        Else
+                            Debug.Print "No 'Retention' found in " & ws.Name & " of " & file.Name
+                        End If
+                    Next ws
+                    
+                    ' Save changes to the original file
+                    If changes > 0 Then
+                        On Error Resume Next
+                        wb.Save
+                        If Err.Number <> 0 Then
+                            Debug.Print "Error saving file: " & file.Path & " - " & Err.Description
+                            Err.Clear
+                        Else
+                            Debug.Print "Saved changes to: " & file.Name & " - " & changes & " changes made"
+                            totalChanges = totalChanges + changes
+                        End If
+                        On Error GoTo 0
+                    Else
+                        Debug.Print "No changes made to: " & file.Name
+                    End If
+                    
+                    ' Close the workbook
+                    wb.Close SaveChanges:=False ' Already saved above if needed
+                Else
+                    Debug.Print "Error opening: " & file.Name & " (" & fileExtension & ") - " & Err.Description
+                    Debug.Print "Skipping this file and continuing..."
+                    skippedFiles = skippedFiles + 1
+                    Err.Clear
+                End If
+                On Error GoTo 0
+            Else
+                Debug.Print "Skipped file: " & file.Name & " (Unsupported extension: " & fileExtension & ")"
+            End If
+        Next file
+    Next subFolder
+    
+    ' Restore original settings
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.Calculation = originalCalculation
+    Application.StatusBar = False
+    
+    ' Summary
+    MsgBox "Process complete!" & vbNewLine & _
+           "Total files processed: " & processedFiles & vbNewLine & _
+           "Files skipped (locked/inaccessible): " & skippedFiles & vbNewLine & _
+           "Total changes made: " & totalChanges & vbNewLine & _
+           "Cells skipped (non-numeric/empty/out of bounds): " & skippedCells & vbNewLine & _
+           "Original files have been modified." & vbNewLine & _
+           "Check the Immediate Window (Ctrl+G) for detailed results.", vbInformation
+End Sub
+
